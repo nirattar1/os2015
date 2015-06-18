@@ -23,262 +23,332 @@
 
 
 
-/************* globals **************/
+//lock on queue
+pthread_mutex_t _global_lock;
 
-// mutex and cond variable
-pthread_mutex_t sharedMutex; // mutex for access to shared "data"
-pthread_cond_t  notEmptyCond; // condition variable to wake up "consumers" of data
-
-// our shared predicates and "data"
-int						isEmpty = 1; // used to signal consumers waiting on condition variable
-int						isDone = 0;
-int						numOfThreads = 0;
-int						rc = 0;
-struct _linked_list*	lst;
-
-/************************************/
+//condition (empty queue)
+pthread_cond_t  _cond_empty;
 
 
-//node list struct
-//node for socket queue
-typedef struct _list_node{
-	int					value;
+//globals
+
+int	NUM_THREADS = 0;
+int	status = 0;
+struct _linked_list* _list;
+//for cond. variable
+int	queue_empty = 1;
+int	done = 0;
+
+
+//////////////
+// node struct
+//////////////
+
+typedef struct _list_node
+{
+	int	data;
 	struct _list_node*	next;
 	struct _list_node*	prev;
 
-}list_node;
+} list_node;
 
+//////////////
+// list struct
+//////////////
 
-//node linked_list
-//node for socket queue
 typedef struct _linked_list{
-	list_node*			head;
-	list_node*			tail;
-	int					nOfElems;
+	int		num_elems;
+	list_node*	_head;
+	list_node*	_tail;
 
-}linked_list;
+} linked_list;
 
-int initList(){
-	lst				= (linked_list*)malloc(sizeof(linked_list));
-	lst->head		= NULL;
-	lst->tail		= NULL;
-	lst->nOfElems	= 0;
+//////////////
 
-	if (rc) {
-		printf("Server: Failed list init, rc=%d.\n", rc);
+
+//handle signal
+static void sigHandle(int signal_type)
+{
+	if (signal_type == SIGINT)
+	{
+		done = 1;
+	}
+}
+
+
+
+
+
+int list_init()
+{
+	_list = (linked_list*)malloc(sizeof(linked_list));
+	_list->_head = NULL;
+	_list->_tail= NULL;
+
+	if (status)
+	{
+		printf("err: Failed to init list. \n");
 		return(1);
 	}
 	return 0;
 }
 
-list_node* initNode(int skfd){
-	list_node* node		= (list_node*)malloc(sizeof(list_node));
-	node->value			= skfd;
-	node->next			= NULL;
-	node->prev			= NULL;
+list_node * InitNode(int skfd)
+{
+	list_node  * newNode		= (list_node*) malloc(sizeof(list_node));
+	newNode->data			= skfd;
+	newNode->next			= NULL;
+	newNode->prev			= NULL;
+	return newNode;
 }
 
-int enqueue(list_node* node){
-	rc = pthread_mutex_lock(&sharedMutex);
-
-	if (lst->nOfElems == 0){
-		lst->head = node;
-		lst->tail = node;
-		lst->nOfElems++;
-		isEmpty = 0;
-	}
-	else {
-		list_node* prev = lst->tail;
-		prev->next = node;
-		lst->tail = node;
-		node->prev = prev;
-		lst->nOfElems++;
-	}
-
-	//signal for threads waiting in deque function
-	rc = pthread_cond_signal(&notEmptyCond);
-
-	rc = pthread_mutex_unlock(&sharedMutex);
-	return 0;
-}
-
-list_node* dequeue(){
+///////////////
+//retrieve a socket from the queue
+list_node* Dequeue()
+{
 	list_node* node = NULL;
-	rc = pthread_mutex_lock(&sharedMutex);
+	status = pthread_mutex_lock(&_global_lock);
 
-	while ( isEmpty && !isDone){
-		//handle SIGINT result while in loop
-		rc = pthread_cond_wait(&notEmptyCond, &sharedMutex);
+	while ( queue_empty && !done)
+	{
 
-		if (rc) {
-			printf("Socket Handler Thread %u: condwait failed, rc=%d\n", (unsigned int)pthread_self(), rc);
-			pthread_mutex_unlock(&sharedMutex);
+		status = pthread_cond_wait(&_cond_empty, &_global_lock); //wait until not empty
+
+		if (status)
+		{
+			pthread_mutex_unlock(&_global_lock);
 			exit(1);
 		}
 	}
 
-	if (!isEmpty){ //condition for waking signal after isDone == 1
-		assert(lst!=0 && lst->tail!=0);
-		list_node* node = lst->tail;
-		lst->tail = node->prev;
-		if (lst->tail)
+
+	//condition for waking signal after done == 1
+	if (!queue_empty)
+	{
+		assert(_list!=0 && _list->_tail!=0);
+		node = _list->_tail;
+		_list->_tail = node->prev;
+		if (_list->_tail)
 		{
-			lst->tail->next = NULL;
+			_list->_tail->next = NULL;
 		}
-		lst->nOfElems--;
-		isEmpty = lst->nOfElems == 0 ? 1 : 0;
+		_list->num_elems--;
+		queue_empty = (_list->num_elems == 0) ? 1 : 0;
 	}
 
-	rc = pthread_mutex_unlock(&sharedMutex);
+	status = pthread_mutex_unlock(&_global_lock);
 
 	return node;
 
 }
 
-void *handleSocket(void *parm){
-	list_node* node;
-	int decfd;
+///////////////
+//adds a socket into the queue
+int Enqueue(list_node* node)
+{
+	status = pthread_mutex_lock(&_global_lock);
+
+	if (_list->num_elems == 0)
+	{
+		_list->_head = node;
+		_list->_tail = node;
+		_list->num_elems++;
+		queue_empty = 0;
+	}
+	else
+	{
+		list_node* prev = _list->_tail;
+		prev->next = node;
+		_list->_tail = node;
+		node->prev = prev;
+		_list->num_elems++;
+	}
+
+	//send signal (for threads trying to deque)
+	status = pthread_cond_signal(&_cond_empty);
+	status = pthread_mutex_unlock(&_global_lock);
+
+
+	return 0;
+}
+
+
+
+//will read from socket
+void * DoWork(void * param)
+
+{
 	char recvBuff[5];
-	int notReaden = sizeof(recvBuff);
+	int need_read = sizeof(recvBuff);
 	int totalRead = 0;
 	int nread = 0;
-	int isClosed = 0;
-  int res;
+	int closed = 0;
+	int res;
 
-	while (!isDone || !isEmpty){
+	list_node * node;
+	int sock_fd;
 
-		node = dequeue();
 
-		while (!isClosed && node!= NULL){
-			decfd = node->value;
-			/* keep looping until nothing left to read*/
-			while (notReaden > 0){
-				/* notReaden = how much we have left to read
-				totalread  = how much we've readen so far
-				nsread = how much we've reden in last read() call */
-				nread = read(decfd, recvBuff + totalRead, notReaden);
-				if (nread < 1){ //socket is closed
-					close(decfd);
-					isClosed = 1;
+
+	while (!queue_empty || !done )
+	{
+
+		node = Dequeue();
+
+		while (!closed && node!= NULL)
+		{
+			sock_fd = node->data;
+
+			//repeat until finished reading
+			while (need_read > 0)
+			{
+
+				nread = read(sock_fd, recvBuff + totalRead, need_read);
+
+
+				if (nread < 1)
+				{
+					close(sock_fd);
+					closed = 1;
 				}
+
+				//update how much we've read
 				totalRead += nread;
-				notReaden -= nread;
+				need_read -= nread;
 			}
-			if (totalRead == 5){
+
+			//have full data- can call appropriate command.
+			if (totalRead == 5)
+			{
 
 				if (atoi(recvBuff) == 0)
+				{
 					res = setos_add(ntohl(*((uint32_t *)(recvBuff + 1))),NULL);
+				}
 				else if (atoi(recvBuff) == 1)
+				{
 					res = setos_remove(ntohl(*((uint32_t *)(recvBuff + 1))), NULL);
+				}
 				else
+				{
 					res = setos_contains(ntohl(*((uint32_t *)(recvBuff + 1))));
+				}
 
-				write(decfd, &res, 1);
+				//reply to client
+				write(sock_fd, &res, 1);
 
-				printf("write:Thread %u:	data = %d, op = %d, res =%d\n", (unsigned int)pthread_self(), ntohl(*((uint32_t *)(recvBuff + 1))), atoi(recvBuff), res );
+
 			}
-			else{
-				printf("Socket Handler Thread %u: read fail,\n", (unsigned int)pthread_self());
+
+
+			else
+			{
+				printf("err: thread %u. Failed to read.\n", (unsigned int)pthread_self());
 			}
 		}
 
-		isClosed = 0;
+		closed = 0;
 	}
 
 
-	return NULL; // exiting gracefuly
+	return NULL;
 }
 
-static void handler(int signum){
-	if (signum == SIGINT)
-		isDone = 1;
-}
 
-int main(int argc, char **argv){
-	int						i; //loop itarating
-	int						listenfd = 0;
-	int						connfd = 0;
-	int						numOfThreads = atoi(argv[1]);
-	struct sockaddr_in		serv_addr;
-	char					sendBuff = 0;
-	pthread_t*				thread;
+
+int main(int argc, char **argv)
+{
+
+	int	 NUM_THREADS = atoi(argv[1]);
+	struct sockaddr_in	serv_addr;
+
+	int	i;
+	int	listenfd = 0;
+	int	connfd = 0;
+	pthread_t* thread;
 	struct sigaction sa;
 
-	//signal init
-	sa.sa_handler = handler;
+	//signal handling
+	sa.sa_handler = sigHandle;
 	sa.sa_flags = 0;
 	sigemptyset(&sa.sa_mask);
+	sigaction(SIGINT, &sa, NULL);
+	sigaction(SIGPIPE, &sa, NULL);
 
-	//signal handler
-	sigaction(SIGINT, &sa, NULL);  //set up isDone to 1
-	sigaction(SIGPIPE, &sa, NULL); //is ingnored in function
 
-	//Threads init
-	thread = (pthread_t*)malloc(numOfThreads*sizeof(pthread_t));
 
-	/* init mutex and cond variable */
-	rc = pthread_mutex_init(&sharedMutex ,NULL);
-	rc = pthread_cond_init(&notEmptyCond, NULL);
+	//init threads
+	thread = (pthread_t*) malloc ( NUM_THREADS * sizeof(pthread_t) );
 
-	//Socket List init
-	initList();
+	//init lock and cond variable
+	status = pthread_mutex_init(&_global_lock ,NULL);
+	status = pthread_cond_init(&_cond_empty, NULL);
 
-	//data List Init
+	//socket list
+	list_init();
+
+	//init of "set" data structure
 	setos_init();
 
-	for (i = 0; i <numOfThreads; i++) {
-		rc = pthread_create(&thread[i], NULL, handleSocket, NULL);
+	for (i = 0; i <NUM_THREADS; i++)
+	{
+		status = pthread_create(&thread[i], NULL, DoWork, NULL);
 	}
-	sleep(2); // give time for all handlers to start
+
+	sleep(2);
 
 	listenfd = socket(AF_INET, SOCK_STREAM, 0);
 	memset(&serv_addr, '0', sizeof(serv_addr));
 
 	serv_addr.sin_family = AF_INET;
-	serv_addr.sin_addr.s_addr = htonl(INADDR_ANY); // INADDR_ANY = any local machine address
+	serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 	serv_addr.sin_port = htons(atoi(argv[2]));
 
+
+	//bind to port
 	if (bind(listenfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr))){
-		printf("\n Error : Bind Failed. %s \n", strerror(errno));
+		printf("\nerr: failed bind %s \n", strerror(errno));
 		return 1;
 	}
 
+	//listen on port
 	if (listen(listenfd, 10)){
-		printf("\n Error : Listen Failed. %s \n", strerror(errno));
+		printf("\nerr: failed listen %s \n", strerror(errno));
 		return 1;
 	}
 
-	while (!isDone) {
+	while (!done)
+	{
 
-		connfd = accept(listenfd, (struct sockaddr*)NULL, NULL);
-		printf("hrtr\n");
+		connfd = accept(listenfd, (struct sockaddr*) NULL, NULL);
 
-		if (isDone) break;
+		if (done) break;
 
-		if (connfd<0){
-			printf("\n Error : Accept Failed. %s \n", strerror(errno));
+		if (connfd<0)
+		{
+			printf("\nerr: failed accept %s \n", strerror(errno));
 		}
 
-		enqueue(initNode(connfd));
+		Enqueue(InitNode(connfd));
 
 	}
 
-	for (i = 0; i <numOfThreads; i++) {
-		rc = pthread_mutex_lock(&sharedMutex); assert(!rc);
-		pthread_cond_signal(&notEmptyCond);
-		rc = pthread_mutex_unlock(&sharedMutex); assert(!rc);
+	for (i = 0; i <NUM_THREADS; i++) {
+		status = pthread_mutex_lock(&_global_lock); assert(!status);
+		pthread_cond_signal(&_cond_empty);
+		status = pthread_mutex_unlock(&_global_lock); assert(!status);
 	}
 
-	sleep(2); // sleep a while to make sure everybody is gone
+	sleep(2);
 
-	// clean up allocated pthread structs
-	printf("Clean up\n");
-	pthread_mutex_destroy(&sharedMutex);
-	pthread_cond_destroy(&notEmptyCond);
+
+	// clean up allocated threads, if exist
+	pthread_mutex_destroy(&_global_lock);
+	pthread_cond_destroy(&_cond_empty);
 	free(thread);
 	setos_free();
-	printf("Main completed\n");
 
 	return 0;
 }
+
 
