@@ -17,13 +17,36 @@ MODULE_LICENSE("GPL");
 #define SUCCESS 0
 #define DEVICE_RANGE_NAME "char_dev"
 #define BUF_LEN 80
+#define BUF_INITIAL "Nir Attar"
+#define BUF_INITIAL_LEN 9
 #define DEVICE_FILE_NAME "simple_char_dev"
-#define BUFFER_CONTENT "Nir Attar"
-#define BUFFER_CONTENT_LEN 9
+
+
+
+//for debug
+#define DEBUG
+
+#ifdef DEBUG
+	#define IS_DEBUG 1
+#else
+	#define IS_DEBUG 0
+#endif
+
+#ifdef DEBUG
+# define DEBUG_PRINT(x) printk x
+#else
+# define DEBUG_PRINT(x) do {} while (0)
+#endif
+
+
+
+
 
 struct chardev_info{
     spinlock_t lock;
 };
+
+
 
 static int dev_open_flag = 0; /* used to prevent concurent access into the same device */
 static struct chardev_info device_info;
@@ -31,8 +54,7 @@ static struct chardev_info device_info;
 static char Message[BUF_LEN]; /* The message the device will give when asked */
 static int major; /* device major number */
 
-//will determine the location inside buffer.
-static int read_location = 0;
+static int last_written = BUF_LEN;
 
 /***************** char device functions *********************/
 
@@ -40,7 +62,7 @@ static int read_location = 0;
 static int device_open(struct inode *inode, struct file *file)
 {
     unsigned long flags; // for spinlock
-    printk("device_open(%p)\n", file);
+    DEBUG_PRINT(("device_open(%p)\n", file));
 
     /* 
      * We don't want to talk to two processes at the same time 
@@ -60,7 +82,7 @@ static int device_open(struct inode *inode, struct file *file)
 static int device_release(struct inode *inode, struct file *file)
 {
     unsigned long flags; // for spinlock
-    printk("device_release(%p,%p)\n", inode, file);
+    DEBUG_PRINT(("device_release(%p,%p)\n", inode, file));
 
     /* ready for our next caller */
     spin_lock_irqsave(&device_info.lock, flags);
@@ -78,73 +100,60 @@ static ssize_t device_read(struct file *file, /* see include/linux/fs.h   */
                loff_t * offset)
 {
 
-    //printk("device_read(%p,%d) - operation not supported yet (last written - %s)\n", file, length, Message);
 
-	//null buffer pointer.
-	if (buffer==NULL || offset==NULL)
-	{
+	char * p; //points to current char.
+	char * endRead;
+	int num_bytes_read = 0;
+
+
+	if (buffer==NULL || offset==NULL){ //checking that buffer/offset are not null pointers.
 		return -EFAULT;
 	}
 
-	char * p;
 
-	//debug
-	printk("offset is : %llu : \n", (long long) *offset);
+	DEBUG_PRINT(("initial offset: %llu\n", (long long) *offset));
 
-	//finding the boundaries where to go.
+	//find start point (where previous call had left)
 	if (*offset == 0)
 	{
-		p = Message;	//starting point (leaves where previous call was done).
+		p = Message;
 	}
 	else
 	{
 		p = Message + *offset;
 	}
 
-	char * end = 0; //end point, will be determined.
-	int consumed = 0;
 
-	//if trying to consume more than buffer
-	if (( p + length ) >= Message + BUF_LEN )
+	//read only until end of buffer, or amount asked (the lesser of them).
+	if ((p+length) >= Message+BUF_LEN )
 	{
-		//read only until end.
-		end = (Message + BUF_LEN);
+		endRead = (Message+BUF_LEN);
 	}
 	else
 	{
-		//read what's asked.
-		end = p + length;
+		endRead = p+length;
 	}
 
 
-
-	while (p < end)
-	{
-		//p = pointer to the current char.
-		printk("reading char %c)\n", *p);
-		if (put_user(*p, buffer+consumed) != 0)
+	//not reaching end and also not past last write size.
+	while (p < endRead && (p<(Message+last_written)) ){
+		if (put_user(*p, buffer+num_bytes_read) != 0)	//checking buffer is ok to write.
 		{
 			return -EFAULT;
 		}
+		DEBUG_PRINT(("current char was %c)\n", *p));
 		p++;
-		consumed++;
-
-		//update offset indication
-		(*offset)++;
-
+		num_bytes_read++;
+		(*offset)++;	//for caller + next calls of this driver.
 
 	}
 
-	//if reached end , then reset offset to start.
-	if (p==(Message + BUF_LEN))
-	{
+	//reset offset if reached end.
+	if (p==(Message + BUF_LEN))	{
 		*offset = 0;
 	}
 
-
-
-	return consumed;
-    //return -EINVAL; // invalid argument error
+	return num_bytes_read;
 }
 
 /* somebody tries to write into our device file */
@@ -152,50 +161,50 @@ static ssize_t
 device_write(struct file *file,
          const char __user * buffer, size_t length, loff_t * offset)
 {
-    printk("device_write(%p,%d)\n", file, length);
 
-    //check given parameters non-null (buffer and offset).
-	if (buffer==NULL || offset==NULL)
-	{
+    char TempBuffer[BUF_LEN]; //temporary buff.
+    int i=0;
+    int num_bytes_wrote;
+
+    DEBUG_PRINT(("device_write(%p,%d)\n", file, (int) length));
+
+	//checking that buffer/offset are not null pointers.
+	if (buffer==NULL || offset==NULL){
 		return -EFAULT;
 	}
 
-    //allocate temporary buffer.
-    char buf_tmp[BUF_LEN];
+    //copy from user buf. to temp.
+    //will write Maximum of chars (BUF_LEN - 1).
 
+    for (i = 0; i < length && i < (BUF_LEN-1); i++){
 
-    //copy from user buffer to temp until consumed all.
-    //run on maximum BUF_LEN - 1 chars.
-    int i=0;
-    for (i = 0; i < length && i < (BUF_LEN-1); i++)
-    {
-		if(get_user(buf_tmp[i], buffer++))
+    	if(get_user(TempBuffer[i], buffer++))
 		{
-			printk("could not write to buffer. \n");
+			DEBUG_PRINT(("corrupt user buffer.\n"));
 			return -EIO;
 		}
 
-		//wrote 1 char.
-		printk("wrote char %c\n", buf_tmp[i]);
+		DEBUG_PRINT(("writing 1 char: %c\n", TempBuffer[i]));
     }
 
-    //tmp was filled correctly,
-    //move on, to copy from temp to destination.
-    int consumed = i;
-	for (i = 0; i < consumed; i++)
-	{
-		Message[i] = buf_tmp[i];
-		printk("wrote char %c\n", Message[i]);
+    num_bytes_wrote = i;
+    //if here then tmp was ok. now fill real buffer.
+	for (i = 0; i < num_bytes_wrote; i++){
+		Message[i] = TempBuffer[i];
+		DEBUG_PRINT(("writing 1 char: %c\n", Message[i]));
 	}
 
-	//null-terminate the buffer (i == last char consumed + 1 )
+	//i indicates is last char written.
+	//null-terminate buffer.
 	Message[i] = '\0';
 
-	//reset offset for future reading
-	*offset = 0;
+	*offset = 0; //update offset for caller
+	last_written = num_bytes_wrote;
 
     /* return the number of input characters used */
-    return consumed;
+    return num_bytes_wrote;
+
+
 }
 
 /************** Module Declarations *****************/
@@ -211,7 +220,7 @@ struct file_operations Fops = {
 
 /* Called when module is loaded. 
  * Initialize the module - Register the character device */
-static int simple_init()
+static int __init simple_init(void)
 {
     /* init dev struct*/
     memset(&device_info, 0, sizeof(struct chardev_info));
@@ -238,9 +247,7 @@ static int simple_init()
 
 
     //init message buffer.
-    strcpy(Message, BUFFER_CONTENT) ; //include \0 at end
-    //init offset inside buffer.
-    read_location = 0;
+    strcpy(Message, BUF_INITIAL) ; //include \0 at end
 
 
     return 0;
