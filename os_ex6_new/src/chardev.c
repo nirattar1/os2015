@@ -152,11 +152,7 @@ static ssize_t
 device_write(struct file *file,
          const char __user * buffer, size_t length, loff_t * offset)
 {
-    int i;
-
     printk("device_write(%p,%d)\n", file, length);
-
-
 
     //check given parameters non-null (buffer and offset).
 	if (buffer==NULL || offset==NULL)
@@ -169,13 +165,14 @@ device_write(struct file *file,
 
 
     //copy from user buffer to temp until consumed all.
-
+    //run on maximum BUF_LEN - 1 chars.
+    int i=0;
     for (i = 0; i < length && i < (BUF_LEN-1); i++)
     {
 		if(get_user(buf_tmp[i], buffer++))
 		{
-			printk("write failed. \n");
-			return -1;
+			printk("could not write to buffer. \n");
+			return -EIO;
 		}
 
 		//wrote 1 char.
@@ -191,7 +188,7 @@ device_write(struct file *file,
 		printk("wrote char %c\n", Message[i]);
 	}
 
-	//null-terminate the buffer
+	//null-terminate the buffer (i == last char consumed + 1 )
 	Message[i] = '\0';
 
 	//reset offset for future reading
