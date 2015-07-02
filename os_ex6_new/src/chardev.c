@@ -81,7 +81,7 @@ static ssize_t device_read(struct file *file, /* see include/linux/fs.h   */
     //printk("device_read(%p,%d) - operation not supported yet (last written - %s)\n", file, length, Message);
 
 	//null buffer pointer.
-	if (buffer==0 || offset==NULL)
+	if (buffer==NULL || offset==NULL)
 	{
 		return -EFAULT;
 	}
@@ -135,7 +135,7 @@ static ssize_t device_read(struct file *file, /* see include/linux/fs.h   */
 
 	}
 
-	//reset offset to start.
+	//if reached end , then reset offset to start.
 	if (p==(Message + BUF_LEN))
 	{
 		*offset = 0;
@@ -156,11 +156,49 @@ device_write(struct file *file,
 
     printk("device_write(%p,%d)\n", file, length);
 
-    for (i = 0; i < length && i < BUF_LEN; i++)
-        get_user(Message[i], buffer + i);
- 
+
+
+    //check given parameters non-null (buffer and offset).
+	if (buffer==NULL || offset==NULL)
+	{
+		return -EFAULT;
+	}
+
+    //allocate temporary buffer.
+    char buf_tmp[BUF_LEN];
+
+
+    //copy from user buffer to temp until consumed all.
+
+    for (i = 0; i < length && i < (BUF_LEN-1); i++)
+    {
+		if(get_user(buf_tmp[i], buffer++))
+		{
+			printk("write failed. \n");
+			return -1;
+		}
+
+		//wrote 1 char.
+		printk("wrote char %c\n", buf_tmp[i]);
+    }
+
+    //tmp was filled correctly,
+    //move on, to copy from temp to destination.
+    int consumed = i;
+	for (i = 0; i < consumed; i++)
+	{
+		Message[i] = buf_tmp[i];
+		printk("wrote char %c\n", Message[i]);
+	}
+
+	//null-terminate the buffer
+	Message[i] = '\0';
+
+	//reset offset for future reading
+	*offset = 0;
+
     /* return the number of input characters used */
-    return i;
+    return consumed;
 }
 
 /************** Module Declarations *****************/

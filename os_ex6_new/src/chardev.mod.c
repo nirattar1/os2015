@@ -21,6 +21,7 @@ __attribute__((section("__versions"))) = {
 	{ 0x6bc3fbc0, "__unregister_chrdev" },
 	{ 0x6ac67c1c, "__register_chrdev" },
 	{ 0xc3aaf0a9, "__put_user_1" },
+	{ 0xf0fdf6cb, "__stack_chk_fail" },
 	{ 0x167e7f9d, "__get_user_1" },
 	{ 0xa1c76e0a, "_cond_resched" },
 	{ 0x8f64aa4, "_raw_spin_unlock_irqrestore" },
@@ -35,4 +36,4 @@ __attribute__((section(".modinfo"))) =
 "depends=";
 
 
-MODULE_INFO(srcversion, "433345289745D72CEFB584C");
+MODULE_INFO(srcversion, "ED4241FB1EA172F48F84854");
